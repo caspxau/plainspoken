@@ -9,6 +9,8 @@ An AI text humanizer that runs in your browser, and can do the rewriting on your
 - **Spots AI tells as you type.** It highlights about 40 common giveaways ("delve", "tapestry", "it's worth noting", "in today's fast-paced world", "Moreover,", "not just X, but Y", em dashes) and lists how often each one shows up.
 - **Scores the text from 0 to 100.** The score combines how many tells there are, how much sentence length varies (people vary it a lot) and whether the text uses contractions.
 - **Rewrites it on your device, or with Claude.** Pick a tone (Casual, Neutral, Professional, Academic) and how much to change (Light touch, Rewrite, From scratch). The rewrite keeps every fact and is told to remove each tell that was found. The result gets its own score so you can compare.
+- **Fixes what still reads as AI.** After a rewrite the AI tells panel switches to the Humanized text and lists what's still flagged, including style issues such as every sentence being the same length. **Fix these tells** runs a second pass that changes only those spots and leaves the rest word for word; **Quick fix** does an instant offline swap; **Undo** goes back.
+- **Shows progress.** A bar under Humanized shows loading, reading and writing, with a time-left estimate based on how fast your device actually runs.
 - **Quick clean.** An instant word swap (utilize → use, em dashes → commas, adds contractions) that works offline with no key.
 
 ## On this device (free, private, offline)
