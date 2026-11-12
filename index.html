@@ -1,0 +1,498 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="description" content="Paste AI-written text, see the phrases that give it away, and rewrite it in a natural human voice.">
+<style>body{margin:0}[hidden]{display:none!important}</style>
+</head>
+<body>
+<title>Plainspoken</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=Atkinson+Hyperlegible:wght@400;700&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: workbench — source on the left (with highlighter scan), rewrite on the right, controls strip on top */
+:root {
+  --bg: #eef1f4;
+  --panel: #ffffff;
+  --ink: #17202a;
+  --muted: #5b6875;
+  --line: #d5dce3;
+  --accent: #2547d0;
+  --accent-ink: #ffffff;
+  --mark: #ffe45c;
+  --mark-ink: #2a2300;
+  --good: #1d7a4a;
+  --warn: #b26a00;
+  --bad: #c0362c;
+  --font-display: "Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
+  --font-body: "Atkinson Hyperlegible", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #11161c; --panel: #19212a; --ink: #e6ebf0; --muted: #93a0ad; --line: #2c3743;
+    --accent: #7d97ff; --accent-ink: #0b1020; --mark: #8a7a12; --mark-ink: #fff8cc;
+    --good: #4cc488; --warn: #e3a33b; --bad: #ff7a6e; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #11161c; --panel: #19212a; --ink: #e6ebf0; --muted: #93a0ad; --line: #2c3743;
+  --accent: #7d97ff; --accent-ink: #0b1020; --mark: #8a7a12; --mark-ink: #fff8cc;
+  --good: #4cc488; --warn: #e3a33b; --bad: #ff7a6e; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--ink); font-family: var(--font-body); font-size: 15px; line-height: 1.55;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 24px 40px;
+}
+.wrap { max-width: 1240px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
+header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; }
+h1 { font-family: var(--font-display); font-weight: 700; font-size: 2rem; margin: 0; letter-spacing: -0.02em; }
+h1 span { background: linear-gradient(transparent 58%, var(--mark) 58%); padding: 0 2px; }
+header p { margin: 0; color: var(--muted); max-width: 60ch; }
+
+.controls {
+  display: flex; flex-wrap: wrap; gap: 14px 22px; align-items: end;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px;
+}
+.field { display: flex; flex-direction: column; gap: 6px; }
+.label { font-family: var(--font-mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.seg button {
+  font: inherit; font-size: 14px; border: 0; background: transparent; color: var(--ink);
+  padding: 7px 12px; cursor: pointer; border-right: 1px solid var(--line);
+}
+.seg button:last-child { border-right: 0; }
+.seg button[aria-pressed="true"] { background: var(--ink); color: var(--panel); }
+.check { display: flex; align-items: center; gap: 8px; font-size: 14px; padding-bottom: 7px; cursor: pointer; }
+.spacer { flex: 1; }
+.btn {
+  font: inherit; font-weight: 700; font-size: 14px; border-radius: 8px; padding: 9px 16px; cursor: pointer;
+  border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+}
+.btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.btn:disabled { opacity: 0.5; cursor: default; }
+button:focus-visible, textarea:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.panes { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+@media (max-width: 860px) { .panes { grid-template-columns: 1fr; } }
+.pane { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; display: flex; flex-direction: column; min-width: 0; }
+.pane-head { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.pane-head h2 { font-family: var(--font-display); font-weight: 500; font-size: 1.05rem; margin: 0; }
+.pane-head .meta { font-family: var(--font-mono); font-size: 12px; color: var(--muted); margin-left: auto; font-variant-numeric: tabular-nums; }
+textarea, .out {
+  font: inherit; font-size: 15px; line-height: 1.65; color: var(--ink); background: transparent;
+  border: 0; resize: vertical; padding: 14px; min-height: 300px; width: 100%; white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.out { margin: 0; }
+.out.placeholder { color: var(--muted); }
+.score { display: flex; gap: 14px; align-items: center; padding: 12px 14px; border-top: 1px solid var(--line); flex-wrap: wrap; }
+.pill { font-family: var(--font-mono); font-size: 12px; font-weight: 600; padding: 3px 9px; border-radius: 99px; border: 1px solid currentColor; white-space: nowrap; }
+.pill.good { color: var(--good); } .pill.warn { color: var(--warn); } .pill.bad { color: var(--bad); }
+.meter { flex: 1; min-width: 120px; height: 8px; background: var(--line); border-radius: 99px; overflow: hidden; }
+.meter i { display: block; height: 100%; border-radius: 99px; transition: width .4s ease, background .4s; }
+.stats { font-family: var(--font-mono); font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+.scan { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+.scan-body { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 0; }
+@media (max-width: 860px) { .scan-body { grid-template-columns: 1fr; } }
+.preview { padding: 14px; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.75; max-height: 340px; overflow: auto; min-width: 0; }
+mark { background: var(--mark); color: var(--mark-ink); border-radius: 3px; padding: 0 2px; }
+.tells { border-left: 1px solid var(--line); padding: 12px 14px; display: flex; flex-direction: column; gap: 6px; max-height: 340px; overflow: auto; }
+@media (max-width: 860px) { .tells { border-left: 0; border-top: 1px solid var(--line); } }
+.tell { display: flex; justify-content: space-between; gap: 10px; font-size: 14px; }
+.tell code { font-family: var(--font-mono); font-size: 12.5px; }
+.tell b { font-family: var(--font-mono); font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.note { font-size: 13px; color: var(--muted); }
+.keybox { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: end; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+.keybox .grow { flex: 1 1 260px; }
+.keybox .note { flex-basis: 100%; margin: 0; }
+.keybox a { color: var(--accent); }
+input[type="password"], select { font: inherit; font-size: 14px; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; width: 100%; }
+.status { font-size: 13px; color: var(--muted); min-height: 1.2em; }
+.status.err { color: var(--bad); }
+@media (prefers-reduced-motion: reduce) { .meter i { transition: none; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <h1><span>Plainspoken</span></h1>
+    <p>Paste AI-written text. It flags the phrases that give it away, then rewrites it to read like a person wrote it.</p>
+  </header>
+
+  <section class="controls" aria-label="Rewrite settings">
+    <div class="field">
+      <span class="label">Tone</span>
+      <div class="seg" id="tone" role="group" aria-label="Tone">
+        <button data-v="casual">Casual</button>
+        <button data-v="neutral" aria-pressed="true">Neutral</button>
+        <button data-v="professional">Professional</button>
+        <button data-v="academic">Academic</button>
+      </div>
+    </div>
+    <div class="field">
+      <span class="label">How much to change</span>
+      <div class="seg" id="strength" role="group" aria-label="How much to change">
+        <button data-v="light">Light touch</button>
+        <button data-v="medium" aria-pressed="true">Rewrite</button>
+        <button data-v="heavy">From scratch</button>
+      </div>
+    </div>
+    <label class="check"><input type="checkbox" id="keepLen" checked> Keep about the same length</label>
+    <div class="spacer"></div>
+    <button class="btn" id="quickBtn" title="Swap common AI words without calling Claude">Quick clean</button>
+    <button class="btn primary" id="goBtn">Humanize</button>
+  </section>
+
+  <div class="panes">
+    <section class="pane">
+      <div class="pane-head"><h2>Original</h2><span class="meta" id="inMeta"></span></div>
+      <textarea id="input" aria-label="Original text" spellcheck="false"></textarea>
+      <div class="score"><span class="pill" id="inPill"></span><div class="meter"><i id="inBar"></i></div><span class="stats" id="inStats"></span></div>
+    </section>
+    <section class="pane">
+      <div class="pane-head">
+        <h2>Humanized</h2>
+        <span class="meta" id="outMeta"></span>
+        <button class="btn" id="stopBtn" hidden>Stop</button>
+        <button class="btn" id="copyBtn" disabled>Copy</button>
+      </div>
+      <pre class="out placeholder" id="output" tabindex="0">Press Humanize and the rewrite appears here.</pre>
+      <div class="score"><span class="pill" id="outPill">—</span><div class="meter"><i id="outBar" style="width:0"></i></div><span class="stats" id="outStats"></span></div>
+    </section>
+  </div>
+  <div class="status" id="status" role="status"></div>
+
+  <section class="keybox" id="keybox" hidden aria-label="Anthropic API key">
+    <div class="field grow">
+      <label class="label" for="apiKey">Anthropic API key</label>
+      <input id="apiKey" type="password" autocomplete="off" spellcheck="false" placeholder="sk-ant-...">
+    </div>
+    <div class="field">
+      <label class="label" for="model">Model</label>
+      <select id="model">
+        <option value="claude-opus-5-5">Claude Opus 5.5 (best)</option>
+        <option value="claude-sonnet-5-5">Claude Sonnet 5.5 (cheaper)</option>
+        <option value="claude-haiku-5-5">Claude Haiku 5.5 (cheapest)</option>
+      </select>
+    </div>
+    <p class="note">Rewrites use your own key, billed to your Anthropic account. The key stays in this browser and is sent only to api.anthropic.com. Get one at <a href="https://console.anthropic.com/settings/keys">console.anthropic.com</a>.</p>
+  </section>
+
+  <section class="scan">
+    <div class="pane-head"><h2>AI tells in the original</h2><span class="meta" id="tellMeta"></span></div>
+    <div class="scan-body">
+      <div class="preview" id="preview"></div>
+      <div class="tells" id="tells"></div>
+    </div>
+  </section>
+  <p class="note">The score is a rough guide built from known AI phrasing and how evenly sentences are sized. It is not an AI detector, and no rewrite can promise to pass one.</p>
+</div>
+
+<script>
+const SAMPLE = `In today's fast-paced digital landscape, effective communication has become more crucial than ever. It's worth noting that remote work has fundamentally transformed the way teams collaborate — fostering a rich tapestry of tools, practices, and cultures.
+
+Moreover, organizations must navigate the complexities of asynchronous workflows. By leveraging robust platforms and embracing a holistic approach, teams can unlock their full potential and seamlessly bridge geographical divides. Furthermore, this shift underscores the pivotal role that trust plays in modern workplaces.
+
+In conclusion, remote work is not just a trend — it's a testament to human adaptability. Whether you're a startup founder or a seasoned executive, embracing this ever-evolving paradigm is paramount to thriving in the years ahead.`;
+
+// [pattern, label, plain replacement for Quick clean (null = leave)]
+const TELLS = [
+  [/\bin today'?s (?:fast-paced |ever-changing |modern |digital )*(?:world|landscape|age|era)\b,?\s*/gi, "in today's … world", ""],
+  [/\b(?:it'?s|it is) (?:worth noting|important to note|important to remember|crucial to remember) that\s*/gi, "it's worth noting that", ""],
+  [/\bdelv(?:e|es|ed|ing)(?: into)?\b/gi, "delve", "dig into"],
+  [/\b(?:rich |vibrant )?tapestry\b/gi, "tapestry", "mix"],
+  [/\b(?:a |is a )?testament to\b/gi, "testament to", "proof of"],
+  [/\bnavigat(?:e|ing) the (?:complexities|intricacies) of\b/gi, "navigate the complexities", "deal with"],
+  [/\bleverag(?:e|es|ed|ing)\b/gi, "leverage", "use"],
+  [/\butiliz(?:e|es|ed|ing)\b/gi, "utilize", "use"],
+  [/\bseamless(?:ly)?\b/gi, "seamless", "smooth"],
+  [/\brobust\b/gi, "robust", "solid"],
+  [/\bpivotal\b/gi, "pivotal", "key"],
+  [/\bcrucial\b/gi, "crucial", "important"],
+  [/\bparamount\b/gi, "paramount", "essential"],
+  [/\bholistic\b/gi, "holistic", "whole"],
+  [/\bunlock(?:s|ing)? (?:their|your|its|the) (?:full )?potential\b/gi, "unlock potential", "do their best work"],
+  [/\bfoster(?:s|ing|ed)?\b/gi, "foster", "build"],
+  [/\bunderscor(?:e|es|ed|ing)\b/gi, "underscore", "shows"],
+  [/\bever-evolving\b/gi, "ever-evolving", "changing"],
+  [/\bfast-paced\b/gi, "fast-paced", null],
+  [/\bembark(?:s|ed|ing)? on\b/gi, "embark on", "start"],
+  [/\bmyriad\b/gi, "myriad", "many"],
+  [/\bplethora of\b/gi, "plethora", "lots of"],
+  [/\bmeticulous(?:ly)?\b/gi, "meticulous", "careful"],
+  [/\bintricate\b/gi, "intricate", "detailed"],
+  [/\bmultifaceted\b/gi, "multifaceted", "complex"],
+  [/\brealm\b/gi, "realm", "area"],
+  [/\bparadigm\b/gi, "paradigm", "model"],
+  [/\bsynergy\b/gi, "synergy", "teamwork"],
+  [/\bgame[- ]changer\b/gi, "game-changer", null],
+  [/\bcutting[- ]edge\b/gi, "cutting-edge", "new"],
+  [/\belevat(?:e|es|ed|ing)\b/gi, "elevate", "improve"],
+  [/\bharness(?:es|ed|ing)?\b/gi, "harness", "use"],
+  [/\bshowcas(?:e|es|ed|ing)\b/gi, "showcase", "show"],
+  [/\bembrac(?:e|es|ed|ing)\b/gi, "embrace", null],
+  [/\b(?:a )?deep dive\b/gi, "deep dive", "close look"],
+  [/\bdive into\b/gi, "dive into", "look at"],
+  [/\bplays? a (?:crucial|pivotal|vital|key|significant) role\b/gi, "plays a crucial role", "matters"],
+  [/\bwhether you'?re an? [^,.]+? or an? [^,.]+?,\s*/gi, "whether you're X or Y", ""],
+  [/\bnot (?:just|only) (?:a |an )?[^,.—]+?[—–,]\s*(?:but|it'?s)\b/gi, "not just X, but Y", null],
+  [/(?:^|(?<=[.!?]\s))(?:Moreover|Furthermore|Additionally|In addition),\s*/gm, "Moreover / Furthermore", ""],
+  [/(?:^|(?<=[.!?]\s))(?:In conclusion|In summary|Ultimately|Overall),\s*/gm, "In conclusion", ""],
+  [/\b(?:I hope this helps|Let me know if you have any (?:other |further )?questions)[.!]?/gi, "I hope this helps", ""],
+  [/\b(?:Certainly|Absolutely|Great question)!\s*/g, "Certainly!", ""],
+  [/\s*[—–]\s*/g, "em dash —", ", "],
+];
+
+const $ = (id) => document.getElementById(id);
+const input = $("input"), output = $("output");
+const state = { tone: "neutral", strength: "medium", lastOut: "" };
+
+function sentences(t) { return t.replace(/\s+/g, " ").split(/(?<=[.!?])\s+/).filter(s => /\w/.test(s)); }
+function words(t) { return (t.match(/\b[\w'’-]+\b/g) || []).length; }
+
+function analyze(text) {
+  const hits = [];
+  TELLS.forEach(([re, label]) => {
+    re.lastIndex = 0;
+    let m;
+    while ((m = re.exec(text))) {
+      if (m[0].length === 0) { re.lastIndex++; continue; }
+      hits.push({ start: m.index, end: m.index + m[0].length, label });
+    }
+  });
+  hits.sort((a, b) => a.start - b.start || b.end - a.end);
+  const merged = [];
+  for (const h of hits) { const last = merged[merged.length - 1]; if (last && h.start < last.end) continue; merged.push(h); }
+
+  const w = words(text);
+  const lens = sentences(text).map(words);
+  const mean = lens.reduce((a, b) => a + b, 0) / (lens.length || 1);
+  const sd = Math.sqrt(lens.reduce((a, b) => a + (b - mean) ** 2, 0) / (lens.length || 1));
+  const variation = mean ? sd / mean : 0;            // "burstiness": humans vary more
+  const density = w ? (merged.length / w) * 100 : 0; // tells per 100 words
+  const contractions = (text.match(/\b\w+['’](?:s|t|re|ve|ll|d|m)\b/gi) || []).length;
+  let score = Math.min(70, density * 9) + Math.max(0, (0.45 - variation)) * 50 + (w > 60 && contractions === 0 ? 8 : 0);
+  score = Math.round(Math.max(0, Math.min(100, score)));
+  return { hits: merged, words: w, sentences: lens.length, variation, density, score };
+}
+
+function paintScore(a, pill, bar, stats) {
+  const cls = a.score < 25 ? "good" : a.score < 55 ? "warn" : "bad";
+  const txt = a.score < 25 ? "Reads human" : a.score < 55 ? "Some AI tells" : "Sounds like AI";
+  pill.className = "pill " + cls; pill.textContent = `${a.score} · ${txt}`;
+  bar.style.width = Math.max(3, a.score) + "%";
+  bar.style.background = `var(--${cls})`;
+  stats.textContent = `${a.hits.length} tells · variety ${a.variation.toFixed(2)}`;
+}
+
+function esc(s) { return s.replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])); }
+
+function refreshInput() {
+  const t = input.value;
+  const a = analyze(t);
+  $("inMeta").textContent = `${a.words} words`;
+  paintScore(a, $("inPill"), $("inBar"), $("inStats"));
+  let html = "", i = 0;
+  for (const h of a.hits) { html += esc(t.slice(i, h.start)) + `<mark title="${esc(h.label)}">${esc(t.slice(h.start, h.end))}</mark>`; i = h.end; }
+  $("preview").innerHTML = (html + esc(t.slice(i))) || `<span class="note">Nothing to scan yet.</span>`;
+  const counts = {};
+  a.hits.forEach(h => counts[h.label] = (counts[h.label] || 0) + 1);
+  const rows = Object.entries(counts).sort((x, y) => y[1] - x[1]);
+  $("tells").innerHTML = rows.length
+    ? rows.map(([l, n]) => `<div class="tell"><code>${esc(l)}</code><b>×${n}</b></div>`).join("")
+    : `<span class="note">No common AI phrases found.</span>`;
+  $("tellMeta").textContent = `${a.hits.length} found`;
+  try { localStorage.setItem("plainspoken-draft", t); } catch {}
+  return a;
+}
+
+function setOutput(text, placeholder) {
+  output.textContent = text;
+  output.classList.toggle("placeholder", !!placeholder);
+  if (!placeholder) {
+    state.lastOut = text;
+    const a = analyze(text);
+    $("outMeta").textContent = `${a.words} words`;
+    paintScore(a, $("outPill"), $("outBar"), $("outStats"));
+    $("copyBtn").disabled = !text.trim();
+  }
+}
+
+function status(msg, err) { $("status").textContent = msg || ""; $("status").classList.toggle("err", !!err); }
+
+// segmented controls
+for (const id of ["tone", "strength"]) {
+  $(id).addEventListener("click", (e) => {
+    const b = e.target.closest("button"); if (!b) return;
+    $(id).querySelectorAll("button").forEach(x => x.setAttribute("aria-pressed", x === b ? "true" : "false"));
+    state[id] = b.dataset.v;
+  });
+  $(id).querySelectorAll("button").forEach(b => { if (!b.hasAttribute("aria-pressed")) b.setAttribute("aria-pressed", "false"); });
+}
+
+// offline quick clean
+function quickClean(t) {
+  let out = t;
+  for (const [re, , rep] of TELLS) {
+    if (rep === null) continue;
+    re.lastIndex = 0;
+    out = out.replace(re, (m) => {
+      if (!rep) return "";
+      return /^[A-Z]/.test(m.trim()) ? rep[0].toUpperCase() + rep.slice(1) : rep;
+    });
+  }
+  out = out.replace(/ ,/g, ",").replace(/,\s*,/g, ",").replace(/ {2,}/g, " ")
+           .replace(/(^|[.!?]\s+|\n)([a-z])/g, (m, p, c) => p + c.toUpperCase())
+           .replace(/\b(it is|do not|does not|is not|are not|cannot|will not|they are|we are|you are|that is)\b/gi, (m) => ({
+             "it is": "it's", "do not": "don't", "does not": "doesn't", "is not": "isn't", "are not": "aren't", "cannot": "can't",
+             "will not": "won't", "they are": "they're", "we are": "we're", "you are": "you're", "that is": "that's" }[m.toLowerCase()] || m));
+  return out;
+}
+$("quickBtn").onclick = () => { setOutput(quickClean(input.value)); status("Quick clean swaps words only. Use Humanize for a full rewrite."); };
+
+// Claude rewrite
+const TONE = {
+  casual: "relaxed and conversational, like a smart friend explaining it. First person is fine if it fits.",
+  neutral: "plain, clear and natural, like a thoughtful person writing a good email.",
+  professional: "professional and direct, like an experienced colleague. No corporate buzzwords.",
+  academic: "academic but readable: precise claims, measured hedging where warranted, no filler, no flourishes.",
+};
+const STRENGTH = {
+  light: "Make the smallest edits that remove the AI tells. Keep the structure and most sentences.",
+  medium: "Rewrite sentences freely, but keep the paragraph structure and every point.",
+  heavy: "Rewrite from scratch as if you were explaining these ideas yourself. Reorder or merge points if it reads better.",
+};
+
+function buildPrompt(text, a) {
+  const found = [...new Set(a.hits.map(h => h.label))];
+  return `Rewrite the text below so it reads like a real person wrote it, not an AI.
+
+Tone: ${TONE[state.tone]}
+Amount of change: ${STRENGTH[state.strength]}
+${$("keepLen").checked ? "Keep roughly the same length (within about 15%)." : "Cut padding; it can get shorter."}
+
+Rules:
+- Keep every fact, name, number and claim. Add no new facts.
+- Vary sentence length a lot: some short ones, some longer. Avoid neat parallel structures and lists of three.
+- Use contractions where a person would.
+- Use concrete, ordinary words. Avoid: delve, tapestry, testament, landscape, realm, leverage, utilize, robust, seamless, pivotal, crucial, paramount, holistic, foster, underscore, navigate, embrace, unlock, elevate, harness, ever-evolving, game-changer.
+- No em dashes or en dashes. Use commas, periods or parentheses.
+- Don't open with scene-setting ("In today's world...") and don't close with a summary ("In conclusion...", "Ultimately...").
+- No "not just X, but Y", no "whether you're A or B", no "it's worth noting", no rhetorical questions as transitions.
+- Don't start sentences with Moreover, Furthermore, Additionally.
+${found.length ? "- These tells were detected in this text, remove all of them: " + found.join("; ") + "." : ""}
+
+Return ONLY the rewritten text, with the same paragraph breaks. No preamble, no quotes, no notes.
+
+TEXT:
+${text}`;
+}
+
+// Two ways to reach Claude: the claude.ai artifact runtime (viewer's own account),
+// or, anywhere else (GitHub Pages, a local file), the viewer's Anthropic API key.
+let sample = null, ctl = null, Anthropic = null;
+const KEY_STORE = "plainspoken-key", MODEL_STORE = "plainspoken-model";
+function store(k, v) { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch {} }
+function load(k) { try { return localStorage.getItem(k) || ""; } catch { return ""; } }
+
+(async () => {
+  try { sample = window.claude ? await window.claude.use("sample") : null; } catch { sample = null; }
+  if (!sample) {
+    $("keybox").hidden = false;
+    $("apiKey").value = load(KEY_STORE);
+    $("model").value = load(MODEL_STORE) || "claude-opus-5-5";
+    $("apiKey").addEventListener("change", () => store(KEY_STORE, $("apiKey").value.trim() || null));
+    $("model").addEventListener("change", () => store(MODEL_STORE, $("model").value));
+  }
+})();
+
+async function viaApiKey(prompt, onText, signal) {
+  const key = $("apiKey").value.trim();
+  if (!key) throw { code: "no_key" };
+  if (!Anthropic) Anthropic = (await import("https://cdn.jsdelivr.net/npm/@anthropic-ai/sdk@1.2.0/+esm")).default;
+  const client = new Anthropic({ apiKey: key, dangerouslyAllowBrowser: true });
+  const model = $("model").value;
+  const params = {
+    model, max_tokens: 16000,
+    output_config: { effort: "medium" },
+    messages: [{ role: "user", content: prompt }],
+  };
+  // Opus/Sonnet 5.5: let the API retry a safety refusal on a fallback model
+  const fallback = model !== "claude-haiku-5-5";
+  const stream = fallback
+    ? client.beta.messages.stream({ ...params, betas: ["server-side-fallback-2026-07-01"], fallbacks: "default" }, { signal })
+    : client.messages.stream(params, { signal });
+  let text = "";
+  stream.on("text", (d) => { text += d; onText(text); });
+  try {
+    const msg = await stream.finalMessage();
+    if (msg.stop_reason === "refusal") throw { code: "refusal", text };
+    return { text, truncated: msg.stop_reason === "max_tokens" };
+  } catch (e) {
+    if (e && e.code) throw e;
+    if (signal.aborted) throw { code: "cancelled", text };
+    const st = e && e.status;
+    throw { code: st === 401 ? "bad_key" : st === 429 ? "rate_limited" : st === 529 ? "overloaded" : "api_error", message: e && e.message, text };
+  }
+}
+
+function rewrite(prompt, onText, signal) {
+  return sample ? sample(prompt, { signal, cache: false, onText: ({ text }) => onText(text) })
+                : viaApiKey(prompt, onText, signal);
+}
+
+const ERR = {
+  not_granted: "Claude access was declined for this page. Quick clean still works.",
+  rate_limited: "Too many requests right now. Wait a minute and try again.",
+  no_key: "Add your Anthropic API key below to rewrite. Quick clean works without one.",
+  bad_key: "That API key was rejected. Check it at console.anthropic.com.",
+  overloaded: "Claude is busy right now. Try again in a moment.",
+  refusal: "Claude declined to rewrite this text.",
+};
+
+$("goBtn").onclick = async () => {
+  const text = input.value.trim();
+  if (!text) { status("Paste some text first.", true); return; }
+  const a = refreshInput();
+  ctl = new AbortController();
+  $("goBtn").disabled = true; $("stopBtn").hidden = false; $("copyBtn").disabled = true;
+  setOutput("Thinking…", true);
+  status("");
+  try {
+    const { text: out, truncated } = await rewrite(buildPrompt(text, a), (t) => setOutput(t), ctl.signal);
+    setOutput(out.trim());
+    const b = analyze(out);
+    status(truncated ? "The answer was cut short. Try a shorter passage." : `Score went from ${a.score} to ${b.score}. Press Humanize again for a different take.`);
+  } catch (e) {
+    if (e.text) setOutput(e.text); else setOutput("Press Humanize and the rewrite appears here.", true);
+    if (e.code !== "cancelled") status(ERR[e.code] || `Rewrite failed: ${e.message || e.code}`, true);
+    if (e.code === "no_key") $("apiKey").focus();
+  } finally {
+    $("goBtn").disabled = false; $("stopBtn").hidden = true;
+  }
+};
+$("stopBtn").onclick = () => ctl?.abort();
+
+$("copyBtn").onclick = async () => {
+  try { await navigator.clipboard.writeText(state.lastOut); status("Copied."); }
+  catch {
+    const r = document.createRange(); r.selectNodeContents(output);
+    const s = getSelection(); s.removeAllRanges(); s.addRange(r);
+    status("Text selected. Press Ctrl+C to copy.");
+  }
+};
+
+let draft = null;
+try { draft = localStorage.getItem("plainspoken-draft"); } catch {}
+input.value = draft && draft.trim() ? draft : SAMPLE;
+input.addEventListener("input", refreshInput);
+refreshInput();
+</script>
+
+</body>
+</html>
