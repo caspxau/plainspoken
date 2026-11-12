@@ -133,7 +133,9 @@ mark.hot { outline: 2px solid var(--accent); }
 .badge { font-family: var(--font-mono); font-size: 12px; color: var(--good); padding-bottom: 9px; }
 .status { font-size: 13px; color: var(--muted); min-height: 1.2em; }
 .status.err { color: var(--bad); }
-@media (prefers-reduced-motion: reduce) { .meter i { transition: none; } }
+@keyframes flash { from { box-shadow: 0 0 0 3px var(--accent); } to { box-shadow: 0 0 0 3px transparent; } }
+.flash { animation: flash 1.4s ease-out; }
+@media (prefers-reduced-motion: reduce) { .meter i { transition: none; } .flash { animation: none; } }
 </style>
 
 <div class="wrap">
@@ -179,7 +181,7 @@ mark.hot { outline: 2px solid var(--accent); }
       <textarea id="input" aria-label="Original text" spellcheck="false"></textarea>
       <div class="score"><span class="pill" id="inPill"></span><div class="meter"><i id="inBar"></i></div><span class="stats" id="inStats"></span></div>
     </section>
-    <section class="pane">
+    <section class="pane" id="outPane">
       <div class="pane-head">
         <h2>Humanized</h2>
         <span class="meta" id="outMeta"></span>
@@ -313,7 +315,7 @@ const TELLS = [
 
 const $ = (id) => document.getElementById(id);
 const input = $("input"), output = $("output");
-const state = { tone: "neutral", strength: "medium", lastOut: "", prevOut: "", scanOf: "input", busy: false };
+const state = { tone: "neutral", strength: "medium", lastOut: "", prevOut: "", scanOf: "input", busy: false, fixing: false };
 
 function sentences(t) { return t.replace(/\s+/g, " ").split(/(?<=[.!?])\s+/).filter(s => /\w/.test(s)); }
 function words(t) { return (t.match(/\b[\w'’-]+\b/g) || []).length; }
@@ -430,7 +432,7 @@ for (const id of ["engine", "tone", "strength"]) {
     const b = e.target.closest("button"); if (!b) return;
     $(id).querySelectorAll("button").forEach(x => x.setAttribute("aria-pressed", x === b ? "true" : "false"));
     state[id] = b.dataset.v;
-    if (id === "engine") applyEngine();
+    if (id === "engine") { applyEngine(); reveal(state.engine === "device" ? $("devbox") : $("keybox"), "center"); }
   });
   $(id).querySelectorAll("button").forEach(b => { if (!b.hasAttribute("aria-pressed")) b.setAttribute("aria-pressed", "false"); });
 }
@@ -456,7 +458,7 @@ function quickClean(t) {
              .replace(/^./, (c) => /[A-Z]/.test(m[0]) ? c.toUpperCase() : c));
   return out;
 }
-$("quickBtn").onclick = () => { setOutput(quickClean(input.value)); status("Quick clean swaps words only. Use Humanize for a full rewrite."); };
+$("quickBtn").onclick = () => { setOutput(quickClean(input.value)); reveal($("outPane")); status("Quick clean swaps words only. Use Humanize for a full rewrite."); };
 
 // Claude rewrite
 const TONE = {
@@ -741,8 +743,8 @@ function ensureEngine() {
       await w.loadModelFromHF({ repo: m.repo, file: m.file }, {
         n_ctx: 4096, n_gpu_layers: 0, reasoning: false,
         n_threads: crossOriginIsolated ? Math.max(1, Math.min(8, navigator.hardwareConcurrency || 2)) : 1,
-        progressCallback: ({ loaded, total }) => progress(total ? loaded / total : 0,
-          `Downloading model: ${(loaded / 1e9).toFixed(2)} of ${(total / 1e9).toFixed(2)} GB`),
+        progressCallback: ({ loaded, total }) => progress(total ? loaded / total : 0, total && loaded >= total
+          ? "Loading model into memory…" : `Downloading model: ${(loaded / 1e9).toFixed(2)} of ${(total / 1e9).toFixed(2)} GB`),
       });
       engine = w;
     }
@@ -928,10 +930,23 @@ const prog = {
 const active = () => !$("runBar").hidden;
 const devSpeed = {}; // per model: ms per input word to read, output words per ms to write
 
+// Bring the place a button changes into view (scrolling up or down as needed) and flash it,
+// so a tap far from the result never looks like it did nothing.
+function reveal(el, block = "start") {
+  if (!el || el.hidden) return;
+  const r = el.getBoundingClientRect(), vh = innerHeight;
+  const visible = r.top >= 0 && r.top < vh * 0.6;
+  if (!visible) el.scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block });
+  el.classList.remove("flash"); void el.offsetWidth; el.classList.add("flash");
+}
+
 function setBusy(b) {
   state.busy = b;
   $("goBtn").disabled = b; $("stopBtn").hidden = !b;
   for (const id of ["fixBtn", "quickFixBtn", "fixBtn2", "undoBtn"]) if (b) $(id).disabled = true; else $(id).disabled = false;
+  $("fixBtn").textContent = b && state.fixing ? "Fixing…" : "Fix these tells";
+  $("fixBtn2").textContent = b && state.fixing ? "Fixing…" : "Fix tells";
+  if (b && state.fixing) $("fixNote").textContent = "Fixing the flagged spots. Watch the Humanized box above.";
   if (!b && state.lastOut) renderScan(analyze(state.scanOf === "output" ? state.lastOut : input.value));
 }
 
@@ -940,6 +955,7 @@ $("goBtn").onclick = () => {
   if (!text) { status("Paste some text first.", true); return; }
   const a = refreshInput();
   state.prevOut = "";
+  reveal($("outPane"));
   run({ text, a, prompt: buildPrompt(text, a) });
 };
 async function fixTells() {
@@ -948,16 +964,20 @@ async function fixTells() {
   if (!text || !(a.hits.length + a.issues.length)) return;
   state.prevOut = text;
   showScan("output");
-  run({ text, a, prompt: fixPrompt(text, a), sys: fixRulesLocal(a), fix: true });
+  reveal($("outPane"));
+  state.fixing = true;
+  await run({ text, a, prompt: fixPrompt(text, a), sys: fixRulesLocal(a), fix: true });
+  state.fixing = false; setBusy(false);
 }
 $("fixBtn").onclick = fixTells;
-$("fixBtn2").onclick = () => { $("scan").scrollIntoView({ behavior: "smooth", block: "start" }); fixTells(); };
+$("fixBtn2").onclick = fixTells;
 $("quickFixBtn").onclick = () => {
   const before = analyze(state.lastOut);
   state.prevOut = state.lastOut;
   setOutput(quickClean(state.lastOut));
   const after = analyze(state.lastOut);
   renderScan(after);
+  reveal($("outPane"));
   status(`Quick fix swapped ${before.hits.length - after.hits.length} phrase${before.hits.length - after.hits.length === 1 ? "" : "s"}. Score went from ${before.score} to ${after.score}.`);
 };
 $("undoBtn").onclick = () => {
@@ -965,6 +985,7 @@ $("undoBtn").onclick = () => {
   const cur = state.lastOut;
   setOutput(state.prevOut); state.prevOut = cur; // undo toggles back and forth
   renderScan(analyze(state.lastOut));
+  reveal($("outPane"));
   status("Restored the previous version. Press Undo again to switch back.");
 };
 
@@ -999,9 +1020,8 @@ async function run({ text, a, prompt, sys, fix }) {
     if (fix) { setOutput(state.prevOut); state.prevOut = ""; } // a failed fix leaves the rewrite as it was
     else if (e.text && e.code !== "switched") setOutput(e.text); else setOutput("Press Humanize and the rewrite appears here.", true);
     if (e.code !== "cancelled") status(e.code === "device_error" || e.code === "switched" ? deviceErr(e) : ERR[e.code] || `Rewrite failed: ${e.message || e.code}`, true);
-    if (e.code === "switched") $("loadBtn").focus();
-    if (e.code === "no_key") $("apiKey").focus();
-    if (e.code === "not_downloaded") $("loadBtn").focus();
+    if (e.code === "switched" || e.code === "not_downloaded" || e.code === "device_error") { reveal($("devbox"), "center"); $("loadBtn").focus({ preventScroll: true }); }
+    if (e.code === "no_key") { reveal($("keybox"), "center"); $("apiKey").focus({ preventScroll: true }); }
   } finally {
     prog.done();
     setBusy(false);
