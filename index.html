@@ -202,6 +202,15 @@ input[type="password"], select { font: inherit; font-size: 14px; color: var(--in
       <label class="label" for="devModel">Model on this device</label>
       <select id="devModel"></select>
     </div>
+    <div class="field">
+      <label class="label" for="runOn">Run on</label>
+      <select id="runOn">
+        <option value="auto">Automatic</option>
+        <option value="gpu16">GPU, fast mode</option>
+        <option value="gpu32">GPU, safe mode</option>
+        <option value="cpu">CPU (works everywhere)</option>
+      </select>
+    </div>
     <span class="badge" id="devBadge"></span>
     <button class="btn" id="loadBtn">Download</button>
     <button class="btn" id="dropBtn" hidden title="Delete the downloaded model from this browser">Remove</button>
@@ -484,7 +493,7 @@ async function viaApiKey(prompt, onText, signal) {
 const WEBLLM_URL = "https://cdn.jsdelivr.net/npm/@mlc-ai/web-llm@0.2.86/+esm";
 const WLLAMA_URL = "https://cdn.jsdelivr.net/npm/@wllama/wllama@3.8.1/esm/index.js";
 const WLLAMA_WASM = "https://cdn.jsdelivr.net/npm/@wllama/wllama@3.8.1/esm/wasm/wllama.wasm";
-const ENGINE_STORE = "plainspoken-engine", DEV_STORE = "plainspoken-devmodel", MODE_STORE = "plainspoken-gpumode";
+const ENGINE_STORE = "plainspoken-engine", DEV_STORE = "plainspoken-devmodel", RUNON_STORE = "plainspoken-runon";
 const GPU_MODELS = [
   { base: "Qwen3.5-0.8B", name: "Small", fits: "phones, tablets, older laptops", gb: 0.4 },
   { base: "Qwen3.5-2B",   name: "Medium", fits: "most laptops", gb: 1.1 },
@@ -494,7 +503,7 @@ const CPU_MODELS = [
   { base: "Qwen3.5-0.8B", name: "Small", fits: "fastest on CPU", gb: 0.5, repo: "unsloth/Qwen3.5-0.8B-GGUF", file: "Qwen3.5-0.8B-Q4_0.gguf" },
   { base: "Qwen3.5-2B",   name: "Medium", fits: "better, slow on CPU", gb: 1.2, repo: "unsloth/Qwen3.5-2B-GGUF", file: "Qwen3.5-2B-Q4_0.gguf" },
 ];
-let gpu = null, webllm = null, wllamaLib = null, wcpu = null, engine = null, engineId = "", loading = null;
+let gpu = null, adapter = { has: false, f16: false }, webllm = null, wllamaLib = null, wcpu = null, engine = null, engineId = "", loading = null;
 const models = () => gpu ? GPU_MODELS : CPU_MODELS;
 
 function setSeg(id, v) {
@@ -518,14 +527,23 @@ const modelId = (m) => gpu ? `${m.base}-${gpu.f16 ? "q4f16_1" : "q4f32_1"}-MLC` 
 async function initDevice() {
   try {
     const ad = navigator.gpu && await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
-    // Phone GPUs often garble half-precision (f16) math, so phones use the f32 build.
-    if (ad) gpu = { f16: ad.features.has("shader-f16") && !isMobile() };
-  } catch { gpu = null; }
-  const mode = load(MODE_STORE); // set after a garbled run: "f32" or "cpu"
-  if (gpu && mode === "f32") gpu.f16 = false;
-  if (mode === "cpu") gpu = null;
-  fillModels();
+    if (ad) adapter = { has: true, f16: ad.features.has("shader-f16") };
+  } catch {}
+  for (const o of $("runOn").options) if (o.value.startsWith("gpu")) o.disabled = !adapter.has || (o.value === "gpu16" && !adapter.f16);
+  setRunOn(load(RUNON_STORE) || "auto", false);
   $("devModel").addEventListener("change", () => { store(DEV_STORE, $("devModel").value); refreshCacheState(); });
+  $("runOn").addEventListener("change", async () => { await unloadEngine(); setRunOn($("runOn").value, true); status(""); });
+}
+// Phone GPUs are unreliable under WebLLM (garbled f16 output, lost buffers, memory
+// resets), so Automatic runs phones on the CPU and computers on the GPU when there is one.
+function setRunOn(v, save) {
+  let opt = $("runOn").querySelector(`option[value="${v}"]`);
+  if (!opt || opt.disabled) v = "auto";
+  $("runOn").value = v;
+  if (save) store(RUNON_STORE, v === "auto" ? null : v);
+  const want = v === "auto" ? (isMobile() || !adapter.has ? "cpu" : adapter.f16 ? "gpu16" : "gpu32") : v;
+  gpu = want === "cpu" ? null : { f16: want === "gpu16" };
+  fillModels(); refreshCacheState();
 }
 function fillModels() {
   const mem = navigator.deviceMemory || 8; // browsers cap this at 8
@@ -536,19 +554,19 @@ function fillModels() {
   if (!$("devModel").value) $("devModel").value = rec;
   $("devNote").textContent = gpu
     ? "Runs in this browser on your own GPU, so nothing you paste leaves the device. The model downloads once, stays cached, and then works offline."
-    : "No usable GPU in this browser, so the model runs on your CPU. That works almost anywhere but is slower: expect a short paragraph to take somewhere between a few seconds and a minute. Nothing you paste leaves the device, and after the one-time download it works offline.";
+    : (adapter.has ? "Runs on your CPU, which is the most reliable option on phones." : "No usable GPU in this browser, so the model runs on your CPU.")
+      + " It's slower than a GPU: expect a short paragraph to take somewhere between a few seconds and a minute. Nothing you paste leaves the device, and after the one-time download it works offline.";
 }
 // A broken GPU path shows up as the same token over and over ("ni ni ni ni").
 const looping = (t) => /(\S{1,12}?)(?:[\s,.]*\1){7,}[\s,.]*$/.test(t.slice(-240));
-// Step down one level after garbled output: GPU f16 -> GPU f32 -> CPU.
-async function stepDown() {
+// Step down after a GPU failure: garbled fast mode -> safe mode; anything else -> CPU.
+async function stepDown(toCpu) {
+  if (!gpu) return false;
   await unloadEngine();
-  if (gpu && gpu.f16) { gpu.f16 = false; store(MODE_STORE, "f32"); }
-  else if (gpu) { gpu = null; store(MODE_STORE, "cpu"); }
-  else return false;
-  fillModels(); refreshCacheState();
+  setRunOn(gpu.f16 && !toCpu ? "gpu32" : "cpu", true);
   return true;
 }
+const gpuFault = (e) => /unmapped|mapAsync|mapping|device (was |is )?lost|GPUBuffer|GPUDevice|WebGPU|OperationError|out of memory|OOM|allocat/i.test((e && e.message) || String(e));
 
 async function gpuLib() { return webllm || (webllm = await import(WEBLLM_URL)); }
 async function cpuLib() {
@@ -627,18 +645,21 @@ function ensureEngine() {
     return engine;
   })().catch(async (e) => {
     if (e && e.code === "degenerate") throw await garbled();
+    if (gpu && gpuFault(e)) throw await garbled(e);
     engine = null; engineId = ""; if (!gpu) wcpu = null;
     throw { code: "device_error", message: (e && e.message) || String(e) };
   }).finally(() => { loading = null; $("devProg").hidden = true; refreshCacheState(); });
   return loading;
 }
 
-async function garbled() {
+// fault = a GPU error object (crash), or undefined (output came out garbled)
+async function garbled(fault) {
   const was = gpu ? (gpu.f16 ? "f16" : "f32") : "cpu";
-  if (!(await stepDown())) return { code: "device_error", message: "The model got stuck repeating itself. Try again, pick a bigger model, or switch to Claude." };
-  return { code: "switched", message: was === "f16"
-    ? "This device's GPU garbled the output in its fast mode, so Plainspoken switched to a safer GPU mode. It needs its own one-time download: press Download, then Humanize again."
-    : "This device's GPU keeps garbling the output, so Plainspoken switched to running on the CPU. It's slower but reliable. Press Download, then Humanize again." };
+  if (!(await stepDown(!!fault))) return { code: "device_error", message: "The model got stuck repeating itself. Try again, pick a bigger model, or switch to Claude." };
+  const why = fault ? `This device's GPU failed while running the model (${(fault.message || String(fault)).slice(0, 80)}).`
+    : was === "f16" ? "This device's GPU garbled the output in its fast mode." : "This device's GPU keeps garbling the output.";
+  const now = gpu ? "Switched to the GPU's safe mode" : "Switched to running on the CPU, which is slower but reliable";
+  return { code: "switched", message: `${why} ${now}. That needs its own one-time download: press Download, then Humanize again. You can change this under Run on.` };
 }
 $("loadBtn").onclick = () => ensureEngine().catch((e) => status(deviceErr(e), true));
 $("dropBtn").onclick = async () => {
@@ -654,7 +675,7 @@ $("dropBtn").onclick = async () => {
 function deviceErr(e) {
   const m = (e && e.message) || "";
   if (e && e.code === "switched") return m;
-  if (/memory|OOM|allocate|device (was )?lost|Device is lost/i.test(m)) return "This device ran out of memory. Pick a smaller model.";
+  if (/memory|OOM|allocat|device (was |is )?lost/i.test(m)) return "This device ran out of memory. Pick a smaller model, or close other apps and tabs.";
   if (/SIMD|exception handling/i.test(m)) return "This browser is too old to run models on-device. Update it, or switch to Claude.";
   if (/fetch|network|Failed to load|download|CSP|Content Security/i.test(m)) return "Couldn't download the model. Check the connection. On claude.ai downloads may be blocked; open caspxau.github.io/plainspoken instead.";
   return "On-device model failed: " + (m || "unknown error");
@@ -710,11 +731,15 @@ async function viaDevice(text, a, onText, signal) {
       } catch (e) { if (!lc.signal.aborted) throw e; }
       if (stuck) throw await garbled();
       let out = tidy(cur).trim();
+      const bullet = /^\s*(?:[*\-•]|\d+[.)])\s/;
+      if (!p.text.split("\n").some(l => bullet.test(l))) out = out.split("\n").filter(l => !bullet.test(l)).join("\n").trim(); // no lists it didn't have
       if (!/[.!?"')\]]$/.test(out)) out = out.replace(/([.!?]["')\]]?)[^.!?]*$/, "$1"); // cut a half sentence at the cap
       done += out + p.sep;
     }
   } catch (e) {
-    throw e && e.code ? e : { code: "device_error", message: (e && e.message) || String(e), text: done };
+    if (e && e.code) throw e;
+    if (gpu && gpuFault(e)) throw await garbled(e);
+    throw { code: "device_error", message: (e && e.message) || String(e), text: done };
   } finally { signal.removeEventListener("abort", stop); if (stuck) lc.abort(); }
   if (signal.aborted) throw { code: "cancelled", text: done };
   // small models still slip in some AI words: run the offline swap over the result

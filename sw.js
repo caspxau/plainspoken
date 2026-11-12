@@ -1,6 +1,6 @@
 // Offline shell for Plainspoken. Model weights are cached by WebLLM itself
 // (Cache Storage), so this only keeps the page, its library and fonts.
-const CACHE = "plainspoken-v4";
+const CACHE = "plainspoken-v5";
 // Pages can't set headers, so add them here: this makes the page cross-origin isolated,
 // which unlocks SharedArrayBuffer and multi-threaded WebAssembly for the CPU engine.
 function isolate(r) {
