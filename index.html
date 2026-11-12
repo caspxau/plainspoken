@@ -422,7 +422,7 @@ Return ONLY the rewritten text, with the same paragraph breaks. No preamble, no 
 // Small on-device models read a long prompt slowly (and follow it worse), so they get a short one.
 function rulesLocal(a) {
   return `You rewrite text so it sounds like a real person wrote it. Tone: ${TONE[state.tone]} ${STRENGTH[state.strength]}
-Keep every fact, name and number. Mix short and long sentences. Use contractions and plain words. No em dashes. Don't start sentences with Moreover, Furthermore or Additionally. No "In conclusion" ending.
+Keep every fact, name and number. Don't add new ideas or sentences: cover the same points, then stop. Mix short and long sentences. Use contractions and plain words. No em dashes. Don't start sentences with Moreover, Furthermore or Additionally. No "In conclusion" ending.
 Reply with only the rewritten text.`;
 }
 function buildPrompt(text, a) { return `${rules(a)}\n\nTEXT:\n${text}`; }
@@ -484,7 +484,7 @@ async function viaApiKey(prompt, onText, signal) {
 const WEBLLM_URL = "https://cdn.jsdelivr.net/npm/@mlc-ai/web-llm@0.2.86/+esm";
 const WLLAMA_URL = "https://cdn.jsdelivr.net/npm/@wllama/wllama@3.8.1/esm/index.js";
 const WLLAMA_WASM = "https://cdn.jsdelivr.net/npm/@wllama/wllama@3.8.1/esm/wasm/wllama.wasm";
-const ENGINE_STORE = "plainspoken-engine", DEV_STORE = "plainspoken-devmodel";
+const ENGINE_STORE = "plainspoken-engine", DEV_STORE = "plainspoken-devmodel", MODE_STORE = "plainspoken-gpumode";
 const GPU_MODELS = [
   { base: "Qwen3.5-0.8B", name: "Small", fits: "phones, tablets, older laptops", gb: 0.4 },
   { base: "Qwen3.5-2B",   name: "Medium", fits: "most laptops", gb: 1.1 },
@@ -518,18 +518,36 @@ const modelId = (m) => gpu ? `${m.base}-${gpu.f16 ? "q4f16_1" : "q4f32_1"}-MLC` 
 async function initDevice() {
   try {
     const ad = navigator.gpu && await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
-    if (ad) gpu = { f16: ad.features.has("shader-f16") };
+    // Phone GPUs often garble half-precision (f16) math, so phones use the f32 build.
+    if (ad) gpu = { f16: ad.features.has("shader-f16") && !isMobile() };
   } catch { gpu = null; }
+  const mode = load(MODE_STORE); // set after a garbled run: "f32" or "cpu"
+  if (gpu && mode === "f32") gpu.f16 = false;
+  if (mode === "cpu") gpu = null;
+  fillModels();
+  $("devModel").addEventListener("change", () => { store(DEV_STORE, $("devModel").value); refreshCacheState(); });
+}
+function fillModels() {
   const mem = navigator.deviceMemory || 8; // browsers cap this at 8
   const rec = !gpu || isMobile() || mem < 8 ? "Qwen3.5-0.8B" : "Qwen3.5-2B";
   $("devModel").innerHTML = models().map(m =>
     `<option value="${m.base}">${m.name} · ${m.fits} · ${m.gb} GB download${m.base === rec ? " (recommended)" : ""}</option>`).join("");
   $("devModel").value = load(DEV_STORE) || rec;
   if (!$("devModel").value) $("devModel").value = rec;
-  $("devModel").addEventListener("change", () => { store(DEV_STORE, $("devModel").value); refreshCacheState(); });
   $("devNote").textContent = gpu
     ? "Runs in this browser on your own GPU, so nothing you paste leaves the device. The model downloads once, stays cached, and then works offline."
     : "No usable GPU in this browser, so the model runs on your CPU. That works almost anywhere but is slower: expect a short paragraph to take somewhere between a few seconds and a minute. Nothing you paste leaves the device, and after the one-time download it works offline.";
+}
+// A broken GPU path shows up as the same token over and over ("ni ni ni ni").
+const looping = (t) => /(\S{1,12}?)(?:[\s,.]*\1){7,}[\s,.]*$/.test(t.slice(-240));
+// Step down one level after garbled output: GPU f16 -> GPU f32 -> CPU.
+async function stepDown() {
+  await unloadEngine();
+  if (gpu && gpu.f16) { gpu.f16 = false; store(MODE_STORE, "f32"); }
+  else if (gpu) { gpu = null; store(MODE_STORE, "cpu"); }
+  else return false;
+  fillModels(); refreshCacheState();
+  return true;
 }
 
 async function gpuLib() { return webllm || (webllm = await import(WEBLLM_URL)); }
@@ -584,6 +602,15 @@ function ensureEngine() {
           { type: "text/javascript" })), { type: "module" });
       } catch { worker = null; } // blocked here: run on the main thread instead
       engine = worker ? await wl.CreateWebWorkerMLCEngine(worker, id, cfg) : await wl.CreateMLCEngine(id, cfg);
+      // Warm up now (the first run compiles GPU shaders and can stall for a while) and
+      // check the GPU gives sane output before the user's text goes through it.
+      status("Warming up the GPU. The first time this can take 10 to 30 seconds…");
+      const r = await engine.chat.completions.create({
+        messages: [{ role: "user", content: "Repeat this sentence exactly: The red fox ran over the hill." }],
+        max_tokens: 24, temperature: 0, extra_body: { enable_thinking: false },
+      });
+      const t = r.choices[0]?.message?.content || "";
+      if (looping(t) || !/fox|hill/i.test(t)) throw { code: "degenerate" };
     } else {
       const w = await cpuLib();
       status("Getting the model ready…");
@@ -598,13 +625,21 @@ function ensureEngine() {
     engineId = id;
     status("Model loaded. It runs on this device from now on, even offline.");
     return engine;
-  })().catch((e) => {
+  })().catch(async (e) => {
+    if (e && e.code === "degenerate") throw await garbled();
     engine = null; engineId = ""; if (!gpu) wcpu = null;
     throw { code: "device_error", message: (e && e.message) || String(e) };
   }).finally(() => { loading = null; $("devProg").hidden = true; refreshCacheState(); });
   return loading;
 }
 
+async function garbled() {
+  const was = gpu ? (gpu.f16 ? "f16" : "f32") : "cpu";
+  if (!(await stepDown())) return { code: "device_error", message: "The model got stuck repeating itself. Try again, pick a bigger model, or switch to Claude." };
+  return { code: "switched", message: was === "f16"
+    ? "This device's GPU garbled the output in its fast mode, so Plainspoken switched to a safer GPU mode. It needs its own one-time download: press Download, then Humanize again."
+    : "This device's GPU keeps garbling the output, so Plainspoken switched to running on the CPU. It's slower but reliable. Press Download, then Humanize again." };
+}
 $("loadBtn").onclick = () => ensureEngine().catch((e) => status(deviceErr(e), true));
 $("dropBtn").onclick = async () => {
   const m = pickedModel(), id = modelId(m);
@@ -618,6 +653,7 @@ $("dropBtn").onclick = async () => {
 };
 function deviceErr(e) {
   const m = (e && e.message) || "";
+  if (e && e.code === "switched") return m;
   if (/memory|OOM|allocate|device (was )?lost|Device is lost/i.test(m)) return "This device ran out of memory. Pick a smaller model.";
   if (/SIMD|exception handling/i.test(m)) return "This browser is too old to run models on-device. Update it, or switch to Claude.";
   if (/fetch|network|Failed to load|download|CSP|Content Security/i.test(m)) return "Couldn't download the model. Check the connection. On claude.ai downloads may be blocked; open caspxau.github.io/plainspoken instead.";
@@ -649,27 +685,37 @@ async function viaDevice(text, a, onText, signal) {
   const sys = rulesLocal(a);
   let done = "";
   status(gpu ? "Rewriting on this device…" : "Rewriting on this device's CPU. This can take a minute…");
-  const stop = () => { if (gpu) eng.interruptGenerate(); };
+  const lc = new AbortController(); // also fired by the loop guard
+  const stop = () => { lc.abort(); if (gpu) eng.interruptGenerate(); };
   signal.addEventListener("abort", stop);
+  let stuck = false;
   try {
     for (const p of pieces(text)) {
       if (signal.aborted) break;
       const req = {
-        stream: true, temperature: 0.8, top_p: 0.9, max_tokens: Math.max(256, words(p.text) * 3),
+        // about 1.3 tokens a word: room for some growth, not for rambling on
+        stream: true, temperature: 0.7, top_p: 0.9, max_tokens: Math.round(words(p.text) * 1.5) + 20,
         messages: [{ role: "system", content: sys }, { role: "user", content: "TEXT:\n" + p.text }],
       };
       let stream;
-      if (gpu) { await eng.resetChat(); stream = await eng.chat.completions.create({ ...req, extra_body: { enable_thinking: false } }); }
-      else stream = await eng.createChatCompletion({ ...req, abortSignal: signal, chat_template_kwargs: { enable_thinking: false } });
+      if (gpu) { await eng.resetChat(); stream = await eng.chat.completions.create({ ...req, repetition_penalty: 1.1, extra_body: { enable_thinking: false } }); }
+      else stream = await eng.createChatCompletion({ ...req, abortSignal: lc.signal, chat_template_kwargs: { enable_thinking: false } });
       let cur = "";
       try {
-        for await (const ch of stream) { cur += ch.choices[0]?.delta?.content || ""; onText(done + tidy(cur)); }
-      } catch (e) { if (!signal.aborted) throw e; }
-      done += tidy(cur).trim() + p.sep;
+        for await (const ch of stream) {
+          cur += ch.choices[0]?.delta?.content || "";
+          if (looping(cur)) { stuck = true; stop(); break; }
+          onText(done + tidy(cur));
+        }
+      } catch (e) { if (!lc.signal.aborted) throw e; }
+      if (stuck) throw await garbled();
+      let out = tidy(cur).trim();
+      if (!/[.!?"')\]]$/.test(out)) out = out.replace(/([.!?]["')\]]?)[^.!?]*$/, "$1"); // cut a half sentence at the cap
+      done += out + p.sep;
     }
   } catch (e) {
     throw e && e.code ? e : { code: "device_error", message: (e && e.message) || String(e), text: done };
-  } finally { signal.removeEventListener("abort", stop); }
+  } finally { signal.removeEventListener("abort", stop); if (stuck) lc.abort(); }
   if (signal.aborted) throw { code: "cancelled", text: done };
   // small models still slip in some AI words: run the offline swap over the result
   return { text: quickClean(done.trim()), truncated: false };
@@ -705,8 +751,9 @@ $("goBtn").onclick = async () => {
     const b = analyze(out);
     status(truncated ? "The answer was cut short. Try a shorter passage." : `Score went from ${a.score} to ${b.score}. Press Humanize again for a different take.`);
   } catch (e) {
-    if (e.text) setOutput(e.text); else setOutput("Press Humanize and the rewrite appears here.", true);
-    if (e.code !== "cancelled") status(e.code === "device_error" ? deviceErr(e) : ERR[e.code] || `Rewrite failed: ${e.message || e.code}`, true);
+    if (e.text && e.code !== "switched") setOutput(e.text); else setOutput("Press Humanize and the rewrite appears here.", true);
+    if (e.code !== "cancelled") status(e.code === "device_error" || e.code === "switched" ? deviceErr(e) : ERR[e.code] || `Rewrite failed: ${e.message || e.code}`, true);
+    if (e.code === "switched") $("loadBtn").focus();
     if (e.code === "no_key") $("apiKey").focus();
     if (e.code === "not_downloaded") $("loadBtn").focus();
   } finally {
