@@ -4,13 +4,17 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="description" content="Paste AI-written text, see the phrases that give it away, and rewrite it in a natural human voice.">
+<meta name="theme-color" content="#2547d0">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon-192.png">
 <style>body{margin:0}[hidden]{display:none!important}</style>
 </head>
 <body>
 <title>Plainspoken</title>
 <meta name="claude:viewport-fit-sides" content="cover">
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=Atkinson+Hyperlegible:wght@400;700&family=JetBrains+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" crossorigin="anonymous" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=Atkinson+Hyperlegible:wght@400;700&family=JetBrains+Mono:wght@400;600&display=swap">
 <style>
 /* Layout: workbench — source on the left (with highlighter scan), rewrite on the right, controls strip on top */
 :root {
@@ -113,6 +117,9 @@ mark { background: var(--mark); color: var(--mark-ink); border-radius: 3px; padd
 .keybox .note { flex-basis: 100%; margin: 0; }
 .keybox a { color: var(--accent); }
 input[type="password"], select { font: inherit; font-size: 14px; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; width: 100%; }
+.prog { flex-basis: 100%; height: 8px; background: var(--line); border-radius: 99px; overflow: hidden; }
+.prog i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+.badge { font-family: var(--font-mono); font-size: 12px; color: var(--good); padding-bottom: 9px; }
 .status { font-size: 13px; color: var(--muted); min-height: 1.2em; }
 .status.err { color: var(--bad); }
 @media (prefers-reduced-motion: reduce) { .meter i { transition: none; } }
@@ -121,10 +128,17 @@ input[type="password"], select { font: inherit; font-size: 14px; color: var(--in
 <div class="wrap">
   <header>
     <h1><span>Plainspoken</span></h1>
-    <p>Paste AI-written text. It flags the phrases that give it away, then rewrites it to read like a person wrote it.</p>
+    <p>Paste AI-written text. It flags the phrases that give it away, then rewrites it to read like a person wrote it, with Claude or with a model that runs on your own phone or computer.</p>
   </header>
 
   <section class="controls" aria-label="Rewrite settings">
+    <div class="field">
+      <span class="label">Rewrite with</span>
+      <div class="seg" id="engine" role="group" aria-label="Rewrite with">
+        <button data-v="claude" aria-pressed="true">Claude</button>
+        <button data-v="device">On this device</button>
+      </div>
+    </div>
     <div class="field">
       <span class="label">Tone</span>
       <div class="seg" id="tone" role="group" aria-label="Tone">
@@ -181,6 +195,18 @@ input[type="password"], select { font: inherit; font-size: 14px; color: var(--in
       </select>
     </div>
     <p class="note">Rewrites use your own key, billed to your Anthropic account. The key stays in this browser and is sent only to api.anthropic.com. Get one at <a href="https://console.anthropic.com/settings/keys">console.anthropic.com</a>.</p>
+  </section>
+
+  <section class="keybox" id="devbox" hidden aria-label="On-device model">
+    <div class="field grow">
+      <label class="label" for="devModel">Model on this device</label>
+      <select id="devModel"></select>
+    </div>
+    <span class="badge" id="devBadge"></span>
+    <button class="btn" id="loadBtn">Download</button>
+    <button class="btn" id="dropBtn" hidden title="Delete the downloaded model from this browser">Remove</button>
+    <div class="prog" id="devProg" hidden><i id="devBar"></i></div>
+    <p class="note" id="devNote">Runs in this browser on your own GPU, so nothing you paste leaves the device. The model downloads once, stays cached, and then works offline.</p>
   </section>
 
   <section class="scan">
@@ -326,11 +352,12 @@ function setOutput(text, placeholder) {
 function status(msg, err) { $("status").textContent = msg || ""; $("status").classList.toggle("err", !!err); }
 
 // segmented controls
-for (const id of ["tone", "strength"]) {
+for (const id of ["engine", "tone", "strength"]) {
   $(id).addEventListener("click", (e) => {
     const b = e.target.closest("button"); if (!b) return;
     $(id).querySelectorAll("button").forEach(x => x.setAttribute("aria-pressed", x === b ? "true" : "false"));
     state[id] = b.dataset.v;
+    if (id === "engine") applyEngine();
   });
   $(id).querySelectorAll("button").forEach(b => { if (!b.hasAttribute("aria-pressed")) b.setAttribute("aria-pressed", "false"); });
 }
@@ -343,14 +370,17 @@ function quickClean(t) {
     re.lastIndex = 0;
     out = out.replace(re, (m) => {
       if (!rep) return "";
-      return /^[A-Z]/.test(m.trim()) ? rep[0].toUpperCase() + rep.slice(1) : rep;
+      let r = rep;
+      if (r === "use") r = /ing$/i.test(m) ? "using" : /ed$/i.test(m) ? "used" : /s$/i.test(m) ? "uses" : "use"; // keep the verb form
+      return /^[A-Z]/.test(m.trim()) ? r[0].toUpperCase() + r.slice(1) : r;
     });
   }
   out = out.replace(/ ,/g, ",").replace(/,\s*,/g, ",").replace(/ {2,}/g, " ")
            .replace(/(^|[.!?]\s+|\n)([a-z])/g, (m, p, c) => p + c.toUpperCase())
            .replace(/\b(it is|do not|does not|is not|are not|cannot|will not|they are|we are|you are|that is)\b/gi, (m) => ({
              "it is": "it's", "do not": "don't", "does not": "doesn't", "is not": "isn't", "are not": "aren't", "cannot": "can't",
-             "will not": "won't", "they are": "they're", "we are": "we're", "you are": "you're", "that is": "that's" }[m.toLowerCase()] || m));
+             "will not": "won't", "they are": "they're", "we are": "we're", "you are": "you're", "that is": "that's" }[m.toLowerCase()] || m)
+             .replace(/^./, (c) => /[A-Z]/.test(m[0]) ? c.toUpperCase() : c));
   return out;
 }
 $("quickBtn").onclick = () => { setOutput(quickClean(input.value)); status("Quick clean swaps words only. Use Humanize for a full rewrite."); };
@@ -368,9 +398,9 @@ const STRENGTH = {
   heavy: "Rewrite from scratch as if you were explaining these ideas yourself. Reorder or merge points if it reads better.",
 };
 
-function buildPrompt(text, a) {
+function rules(a) {
   const found = [...new Set(a.hits.map(h => h.label))];
-  return `Rewrite the text below so it reads like a real person wrote it, not an AI.
+  return `Rewrite the text you are given so it reads like a real person wrote it, not an AI.
 
 Tone: ${TONE[state.tone]}
 Amount of change: ${STRENGTH[state.strength]}
@@ -387,11 +417,15 @@ Rules:
 - Don't start sentences with Moreover, Furthermore, Additionally.
 ${found.length ? "- These tells were detected in this text, remove all of them: " + found.join("; ") + "." : ""}
 
-Return ONLY the rewritten text, with the same paragraph breaks. No preamble, no quotes, no notes.
-
-TEXT:
-${text}`;
+Return ONLY the rewritten text, with the same paragraph breaks. No preamble, no quotes, no notes.`;
 }
+// Small on-device models read a long prompt slowly (and follow it worse), so they get a short one.
+function rulesLocal(a) {
+  return `You rewrite text so it sounds like a real person wrote it. Tone: ${TONE[state.tone]} ${STRENGTH[state.strength]}
+Keep every fact, name and number. Mix short and long sentences. Use contractions and plain words. No em dashes. Don't start sentences with Moreover, Furthermore or Additionally. No "In conclusion" ending.
+Reply with only the rewritten text.`;
+}
+function buildPrompt(text, a) { return `${rules(a)}\n\nTEXT:\n${text}`; }
 
 // Two ways to reach Claude: the claude.ai artifact runtime (viewer's own account),
 // or, anywhere else (GitHub Pages, a local file), the viewer's Anthropic API key.
@@ -400,16 +434,19 @@ const KEY_STORE = "plainspoken-key", MODEL_STORE = "plainspoken-model";
 function store(k, v) { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch {} }
 function load(k) { try { return localStorage.getItem(k) || ""; } catch { return ""; } }
 
-(async () => {
+async function boot() {
   try { sample = window.claude ? await window.claude.use("sample") : null; } catch { sample = null; }
+  await initDevice();
   if (!sample) {
-    $("keybox").hidden = false;
     $("apiKey").value = load(KEY_STORE);
     $("model").value = load(MODEL_STORE) || "claude-opus-5-5";
     $("apiKey").addEventListener("change", () => store(KEY_STORE, $("apiKey").value.trim() || null));
     $("model").addEventListener("change", () => store(MODEL_STORE, $("model").value));
   }
-})();
+  // first visit off claude.ai with no key: default to the free on-device engine
+  const saved = load(ENGINE_STORE) || (!sample && !load(KEY_STORE) ? "device" : "claude");
+  setSeg("engine", saved);
+}
 
 async function viaApiKey(prompt, onText, signal) {
   const key = $("apiKey").value.trim();
@@ -441,7 +478,205 @@ async function viaApiKey(prompt, onText, signal) {
   }
 }
 
-function rewrite(prompt, onText, signal) {
+// ---------- On-device engine ----------
+// With a usable GPU (WebGPU) it runs WebLLM. Without one it falls back to llama.cpp
+// compiled to WebAssembly (wllama) on the CPU: slower, but it works on almost anything.
+const WEBLLM_URL = "https://cdn.jsdelivr.net/npm/@mlc-ai/web-llm@0.2.86/+esm";
+const WLLAMA_URL = "https://cdn.jsdelivr.net/npm/@wllama/wllama@3.8.1/esm/index.js";
+const WLLAMA_WASM = "https://cdn.jsdelivr.net/npm/@wllama/wllama@3.8.1/esm/wasm/wllama.wasm";
+const ENGINE_STORE = "plainspoken-engine", DEV_STORE = "plainspoken-devmodel";
+const GPU_MODELS = [
+  { base: "Qwen3.5-0.8B", name: "Small", fits: "phones, tablets, older laptops", gb: 0.4 },
+  { base: "Qwen3.5-2B",   name: "Medium", fits: "most laptops", gb: 1.1 },
+  { base: "Qwen3.5-4B",   name: "Large", fits: "PCs with a good GPU", gb: 2.4 },
+];
+const CPU_MODELS = [
+  { base: "Qwen3.5-0.8B", name: "Small", fits: "fastest on CPU", gb: 0.5, repo: "unsloth/Qwen3.5-0.8B-GGUF", file: "Qwen3.5-0.8B-Q4_0.gguf" },
+  { base: "Qwen3.5-2B",   name: "Medium", fits: "better, slow on CPU", gb: 1.2, repo: "unsloth/Qwen3.5-2B-GGUF", file: "Qwen3.5-2B-Q4_0.gguf" },
+];
+let gpu = null, webllm = null, wllamaLib = null, wcpu = null, engine = null, engineId = "", loading = null;
+const models = () => gpu ? GPU_MODELS : CPU_MODELS;
+
+function setSeg(id, v) {
+  const b = $(id).querySelector(`button[data-v="${v}"]`); if (!b) return;
+  $(id).querySelectorAll("button").forEach(x => x.setAttribute("aria-pressed", x === b ? "true" : "false"));
+  state[id] = v;
+  if (id === "engine") applyEngine();
+}
+function applyEngine() {
+  store(ENGINE_STORE, state.engine);
+  const dev = state.engine === "device";
+  $("keybox").hidden = dev || !!sample;
+  $("devbox").hidden = !dev;
+  status("");
+  if (dev) refreshCacheState();
+}
+const isMobile = () => navigator.userAgentData?.mobile ?? /Android|iPhone|iPad|Mobile/i.test(navigator.userAgent);
+const pickedModel = () => models().find(m => m.base === $("devModel").value) || models()[0];
+const modelId = (m) => gpu ? `${m.base}-${gpu.f16 ? "q4f16_1" : "q4f32_1"}-MLC` : m.file;
+
+async function initDevice() {
+  try {
+    const ad = navigator.gpu && await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
+    if (ad) gpu = { f16: ad.features.has("shader-f16") };
+  } catch { gpu = null; }
+  const mem = navigator.deviceMemory || 8; // browsers cap this at 8
+  const rec = !gpu || isMobile() || mem < 8 ? "Qwen3.5-0.8B" : "Qwen3.5-2B";
+  $("devModel").innerHTML = models().map(m =>
+    `<option value="${m.base}">${m.name} · ${m.fits} · ${m.gb} GB download${m.base === rec ? " (recommended)" : ""}</option>`).join("");
+  $("devModel").value = load(DEV_STORE) || rec;
+  if (!$("devModel").value) $("devModel").value = rec;
+  $("devModel").addEventListener("change", () => { store(DEV_STORE, $("devModel").value); refreshCacheState(); });
+  $("devNote").textContent = gpu
+    ? "Runs in this browser on your own GPU, so nothing you paste leaves the device. The model downloads once, stays cached, and then works offline."
+    : "No usable GPU in this browser, so the model runs on your CPU. That works almost anywhere but is slower: expect a short paragraph to take somewhere between a few seconds and a minute. Nothing you paste leaves the device, and after the one-time download it works offline.";
+}
+
+async function gpuLib() { return webllm || (webllm = await import(WEBLLM_URL)); }
+async function cpuLib() {
+  if (!wcpu) {
+    wllamaLib = wllamaLib || await import(WLLAMA_URL);
+    wcpu = new wllamaLib.Wllama({ default: WLLAMA_WASM }, { suppressNativeLog: true, allowOffline: true, logger: wllamaLib.LoggerWithoutDebug });
+  }
+  return wcpu;
+}
+async function isCached(m) {
+  try {
+    if (gpu) return await (await gpuLib()).hasModelInCache(modelId(m));
+    return (await (await cpuLib()).cacheManager.list()).some(e => (e.metadata?.originalURL || e.name).includes(m.file));
+  } catch { return false; }
+}
+async function refreshCacheState() {
+  const m = pickedModel();
+  const cached = await isCached(m);
+  if (pickedModel() !== m) return;
+  const ready = engine && engineId === modelId(m);
+  $("devBadge").textContent = (ready ? "● Loaded" : cached ? "✓ Downloaded" : "") + (gpu ? " · GPU" : " · CPU");
+  $("loadBtn").textContent = ready ? "Loaded" : cached ? "Load" : `Download ${m.gb} GB`;
+  $("loadBtn").disabled = !!ready || !!loading;
+  $("dropBtn").hidden = !cached;
+  return cached;
+}
+
+const progress = (p, text) => { $("devBar").style.width = Math.round(p * 100) + "%"; status(text); };
+async function unloadEngine() {
+  if (!engine) return;
+  try { gpu ? await engine.unload() : await engine.exit(); } catch {}
+  engine = null; engineId = "";
+  if (!gpu) wcpu = null; // a fresh instance for the next model
+}
+
+function ensureEngine() {
+  const m = pickedModel(), id = modelId(m);
+  if (engine && engineId === id) return Promise.resolve(engine);
+  if (loading) return loading;
+  loading = (async () => {
+    await unloadEngine();
+    $("devProg").hidden = false; $("loadBtn").disabled = true;
+    if (gpu) {
+      const wl = await gpuLib();
+      const cfg = { initProgressCallback: (r) => progress(r.progress || 0, r.text.replace(/\[.*?\]\s*/g, "")) };
+      let worker = null;
+      try {
+        worker = new Worker(URL.createObjectURL(new Blob([
+          `import { WebWorkerMLCEngineHandler } from "${WEBLLM_URL}";
+           const h = new WebWorkerMLCEngineHandler(); self.onmessage = (e) => h.onmessage(e);`],
+          { type: "text/javascript" })), { type: "module" });
+      } catch { worker = null; } // blocked here: run on the main thread instead
+      engine = worker ? await wl.CreateWebWorkerMLCEngine(worker, id, cfg) : await wl.CreateMLCEngine(id, cfg);
+    } else {
+      const w = await cpuLib();
+      status("Getting the model ready…");
+      await w.loadModelFromHF({ repo: m.repo, file: m.file }, {
+        n_ctx: 4096, n_gpu_layers: 0, reasoning: false,
+        n_threads: crossOriginIsolated ? Math.max(1, Math.min(8, navigator.hardwareConcurrency || 2)) : 1,
+        progressCallback: ({ loaded, total }) => progress(total ? loaded / total : 0,
+          `Downloading model: ${(loaded / 1e9).toFixed(2)} of ${(total / 1e9).toFixed(2)} GB`),
+      });
+      engine = w;
+    }
+    engineId = id;
+    status("Model loaded. It runs on this device from now on, even offline.");
+    return engine;
+  })().catch((e) => {
+    engine = null; engineId = ""; if (!gpu) wcpu = null;
+    throw { code: "device_error", message: (e && e.message) || String(e) };
+  }).finally(() => { loading = null; $("devProg").hidden = true; refreshCacheState(); });
+  return loading;
+}
+
+$("loadBtn").onclick = () => ensureEngine().catch((e) => status(deviceErr(e), true));
+$("dropBtn").onclick = async () => {
+  const m = pickedModel(), id = modelId(m);
+  if (engineId === id) await unloadEngine();
+  try {
+    if (gpu) await (await gpuLib()).deleteModelAllInfoInCache(id);
+    else await (await cpuLib()).cacheManager.deleteMany(e => (e.metadata?.originalURL || e.name).includes(m.file));
+    status("Model removed from this browser.");
+  } catch (e) { status("Couldn't remove it: " + (e.message || e), true); }
+  refreshCacheState();
+};
+function deviceErr(e) {
+  const m = (e && e.message) || "";
+  if (/memory|OOM|allocate|device (was )?lost|Device is lost/i.test(m)) return "This device ran out of memory. Pick a smaller model.";
+  if (/SIMD|exception handling/i.test(m)) return "This browser is too old to run models on-device. Update it, or switch to Claude.";
+  if (/fetch|network|Failed to load|download|CSP|Content Security/i.test(m)) return "Couldn't download the model. Check the connection. On claude.ai downloads may be blocked; open caspxau.github.io/plainspoken instead.";
+  return "On-device model failed: " + (m || "unknown error");
+}
+
+// small context window: rewrite in pieces of a few paragraphs
+function pieces(text, max = 300) {
+  const units = [];
+  for (const p of text.split(/\n\s*\n/)) {
+    if (words(p) <= max) { units.push([p, "\n\n"]); continue; }
+    let cur = "";
+    for (const s of p.split(/(?<=[.!?])\s+/)) { if (cur && words(cur + s) > max) { units.push([cur.trim(), " "]); cur = ""; } cur += s + " "; }
+    if (cur.trim()) units.push([cur.trim(), "\n\n"]);
+  }
+  const out = []; let cur = null;
+  for (const [u, sep] of units) {
+    if (cur && words(cur.text + u) <= max) { cur.text += cur.sep + u; cur.sep = sep; }
+    else { if (cur) out.push(cur); cur = { text: u, sep }; }
+  }
+  if (cur) out.push(cur);
+  return out; // each: { text, sep } where sep joins it to the next piece
+}
+const tidy = (t) => t.replace(/<think>[\s\S]*?(<\/think>|$)/g, "").replace(/^\s*(here(?:'s| is)[^\n]*?:|rewritten text:)\s*/i, "");
+
+async function viaDevice(text, a, onText, signal) {
+  if (!(engine && engineId === modelId(pickedModel())) && !loading && !(await refreshCacheState())) throw { code: "not_downloaded" };
+  const eng = await ensureEngine();
+  const sys = rulesLocal(a);
+  let done = "";
+  status(gpu ? "Rewriting on this device…" : "Rewriting on this device's CPU. This can take a minute…");
+  const stop = () => { if (gpu) eng.interruptGenerate(); };
+  signal.addEventListener("abort", stop);
+  try {
+    for (const p of pieces(text)) {
+      if (signal.aborted) break;
+      const req = {
+        stream: true, temperature: 0.8, top_p: 0.9, max_tokens: Math.max(256, words(p.text) * 3),
+        messages: [{ role: "system", content: sys }, { role: "user", content: "TEXT:\n" + p.text }],
+      };
+      let stream;
+      if (gpu) { await eng.resetChat(); stream = await eng.chat.completions.create({ ...req, extra_body: { enable_thinking: false } }); }
+      else stream = await eng.createChatCompletion({ ...req, abortSignal: signal, chat_template_kwargs: { enable_thinking: false } });
+      let cur = "";
+      try {
+        for await (const ch of stream) { cur += ch.choices[0]?.delta?.content || ""; onText(done + tidy(cur)); }
+      } catch (e) { if (!signal.aborted) throw e; }
+      done += tidy(cur).trim() + p.sep;
+    }
+  } catch (e) {
+    throw e && e.code ? e : { code: "device_error", message: (e && e.message) || String(e), text: done };
+  } finally { signal.removeEventListener("abort", stop); }
+  if (signal.aborted) throw { code: "cancelled", text: done };
+  // small models still slip in some AI words: run the offline swap over the result
+  return { text: quickClean(done.trim()), truncated: false };
+}
+
+function rewrite(prompt, onText, signal, text, a) {
+  if (state.engine === "device") return viaDevice(text, a, onText, signal);
   return sample ? sample(prompt, { signal, cache: false, onText: ({ text }) => onText(text) })
                 : viaApiKey(prompt, onText, signal);
 }
@@ -453,6 +688,7 @@ const ERR = {
   bad_key: "That API key was rejected. Check it at console.anthropic.com.",
   overloaded: "Claude is busy right now. Try again in a moment.",
   refusal: "Claude declined to rewrite this text.",
+  not_downloaded: "Download the on-device model first. It's a one-time download.",
 };
 
 $("goBtn").onclick = async () => {
@@ -464,14 +700,15 @@ $("goBtn").onclick = async () => {
   setOutput("Thinking…", true);
   status("");
   try {
-    const { text: out, truncated } = await rewrite(buildPrompt(text, a), (t) => setOutput(t), ctl.signal);
+    const { text: out, truncated } = await rewrite(buildPrompt(text, a), (t) => setOutput(t), ctl.signal, text, a);
     setOutput(out.trim());
     const b = analyze(out);
     status(truncated ? "The answer was cut short. Try a shorter passage." : `Score went from ${a.score} to ${b.score}. Press Humanize again for a different take.`);
   } catch (e) {
     if (e.text) setOutput(e.text); else setOutput("Press Humanize and the rewrite appears here.", true);
-    if (e.code !== "cancelled") status(ERR[e.code] || `Rewrite failed: ${e.message || e.code}`, true);
+    if (e.code !== "cancelled") status(e.code === "device_error" ? deviceErr(e) : ERR[e.code] || `Rewrite failed: ${e.message || e.code}`, true);
     if (e.code === "no_key") $("apiKey").focus();
+    if (e.code === "not_downloaded") $("loadBtn").focus();
   } finally {
     $("goBtn").disabled = false; $("stopBtn").hidden = true;
   }
@@ -492,6 +729,18 @@ try { draft = localStorage.getItem("plainspoken-draft"); } catch {}
 input.value = draft && draft.trim() ? draft : SAMPLE;
 input.addEventListener("input", refreshInput);
 refreshInput();
+boot();
+// The service worker makes the page work offline and adds the cross-origin isolation
+// headers GitHub Pages can't send, which lets the CPU engine use every core.
+if ("serviceWorker" in navigator && isSecureContext && !window.claude) {
+  navigator.serviceWorker.register("sw.js").then(() => {
+    if (crossOriginIsolated) return;
+    let once = false; try { once = sessionStorage.getItem("plainspoken-coi"); sessionStorage.setItem("plainspoken-coi", "1"); } catch {}
+    if (once) return;
+    if (navigator.serviceWorker.controller) location.reload();
+    else navigator.serviceWorker.addEventListener("controllerchange", () => location.reload(), { once: true });
+  }).catch(() => {});
+}
 </script>
 
 </body>
